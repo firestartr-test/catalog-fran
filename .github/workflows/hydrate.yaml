@@ -1,0 +1,92 @@
+name: 💧 Hydrate
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+       
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+
+jobs:
+ open_pull_request:
+  runs-on: ubuntu-latest
+  name: "⸙ Open/Update pull request"
+  container:
+    image: ghcr.io/prefapp/gitops-k8s:${{ vars.FIRESTARTER_WORKFLOW_DOCKER_IMAGE_TAG }}
+  env:
+    GITHUB_APP_ID: ${{ vars.FIRESTARTER_GITHUB_APP_ID }}
+    GITHUB_APP_INSTALLATION_ID: ${{ vars.FIRESTARTER_GITHUB_APP_INSTALLATION_ID }}
+    GITHUB_APP_INSTALLATION_ID_PREFAPP: ${{ vars.FIRESTARTER_GITHUB_APP_INSTALLATION_ID_PREFAPP }}
+    ORG: ${{ github.repository_owner }}
+    DEBUG: "firestarter:*"
+    CDK8S_OUT_DIR: "/tmp/.resources"
+    CATALOG_OUT_DIR: "/tmp/.catalog"
+  steps:
+    
+    - name: Create token from Github App
+      uses: actions/create-github-app-token@v1
+      id: app-token
+      with:
+        app-id: ${{ vars.FIRESTARTER_GITHUB_APP_ID }}
+        private-key: ${{ secrets.FIRESTARTR_GITHUB_APP_PEM_FILE }}
+        owner: ${{ github.repository_owner }}
+    
+    - name: Checkout wet repo 
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: ${{ github.event.repository.default_branch }}
+        path: crs
+  
+    - name: Checkout claims repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        repository: ${{ github.repository_owner }}/claims
+        ref: ${{ vars.CLAIMS_REPO_DEFAULT_BRANCH }}
+        path: claimsdir
+        token: ${{ steps.app-token.outputs.token }}
+
+    - name: Render Claims
+      working-directory: /library
+      env:
+        GITHUB_APP_PEM_FILE: ${{ secrets.FIRESTARTR_GITHUB_APP_PEM_FILE }}
+      run: |
+        # Render Crs
+        ./run.sh cdk8s \
+          --render \
+          --disableRenames \
+          --globals "$GITHUB_WORKSPACE/crs/.config" \
+          --initializers "$GITHUB_WORKSPACE/crs/.config" \
+          --claims "$GITHUB_WORKSPACE/claimsdir/claims" \
+          --previousCRs "$GITHUB_WORKSPACE/crs" \
+          --excludePath "$GITHUB_WORKSPACE/crs/.github" \
+          --claimsDefaults "$GITHUB_WORKSPACE/claimsdir/.config" \
+          --outputCatalogDir "${{ env.CATALOG_OUT_DIR }}" \
+          --outputCrDir "${{ env.CDK8S_OUT_DIR }}" \
+          --provider ${{ vars.FIRESTARTER_PROVIDER }}
+
+        # Clean crs folder and copy new rendered crs
+        rm -f $GITHUB_WORKSPACE/crs/Component*
+        rm -f $GITHUB_WORKSPACE/crs/System*
+        rm -f $GITHUB_WORKSPACE/crs/Group*
+        rm -f $GITHUB_WORKSPACE/crs/User*
+        rm -f $GITHUB_WORKSPACE/crs/Domain*
+        rm -f $GITHUB_WORKSPACE/crs/Resource*
+        cp -r ${{ env.CATALOG_OUT_DIR }}/* $GITHUB_WORKSPACE/crs/
+            
+    - name: Create/Update Pull Request
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ steps.app-token.outputs.token }}
+        commit-message: 'feat: hydrate crs'
+        branch: automated/CRs-update
+        delete-branch: false
+        labels: automerge
+        path: crs
+        title: '🚀 firestartr - hydrate CRs'
